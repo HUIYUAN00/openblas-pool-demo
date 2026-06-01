@@ -34,21 +34,23 @@ static void *worker(void *arg) {
         while (!queue && !pool->shutdown) {
             YIELDING;
             
-            /* 超时检查 */
-            if (pool->thread_timeout > 0 && 
-                rpcc() - last_tick > pool->thread_timeout) {
-                /* 第二阶段：休眠等待（长时间无任务） */
-                pthread_mutex_lock(&pool->thread_lock[cpu]);
-                pool->thread_status[cpu] = THREAD_STATUS_SLEEP;
-                
-                while (pool->thread_status[cpu] == THREAD_STATUS_SLEEP &&
-                       !atomic_load_ptr(&pool->thread_queue[cpu]) &&
-                       !pool->shutdown) {
-                    pthread_cond_wait(&pool->thread_wakeup[cpu], 
-                                      &pool->thread_lock[cpu]);
+            /* 超时检查 - 防止溢出和回绕误判 */
+            if (pool->thread_timeout > 0) {
+                unsigned long elapsed = rpcc() - last_tick;
+                if (elapsed > pool->thread_timeout && elapsed < (1UL << 63)) {
+                    /* 第二阶段：休眠等待（长时间无任务） */
+                    pthread_mutex_lock(&pool->thread_lock[cpu]);
+                    pool->thread_status[cpu] = THREAD_STATUS_SLEEP;
+                    
+                    while (pool->thread_status[cpu] == THREAD_STATUS_SLEEP &&
+                           !atomic_load_ptr(&pool->thread_queue[cpu]) &&
+                           !pool->shutdown) {
+                        pthread_cond_wait(&pool->thread_wakeup[cpu], 
+                                          &pool->thread_lock[cpu]);
+                    }
+                    pthread_mutex_unlock(&pool->thread_lock[cpu]);
+                    last_tick = rpcc();
                 }
-                pthread_mutex_unlock(&pool->thread_lock[cpu]);
-                last_tick = rpcc();
             }
             
             queue = atomic_load_ptr(&pool->thread_queue[cpu]);
@@ -114,6 +116,12 @@ int thread_pool_init(thread_pool_t *pool, int num_threads, int use_spinning) {
         
         if (pthread_mutex_init(&pool->thread_lock[i], NULL) != 0) {
             perror("Failed to init thread lock");
+            /* 清理之前已初始化的mutex/cond */
+            for (int j = 0; j < i; j++) {
+                pthread_mutex_destroy(&pool->thread_lock[j]);
+                pthread_cond_destroy(&pool->thread_wakeup[j]);
+            }
+            pthread_mutex_destroy(&pool->dispatch_lock);
             pool->initialized = 0;
             return -1;
         }
@@ -121,6 +129,12 @@ int thread_pool_init(thread_pool_t *pool, int num_threads, int use_spinning) {
         if (pthread_cond_init(&pool->thread_wakeup[i], NULL) != 0) {
             perror("Failed to init thread cond");
             pthread_mutex_destroy(&pool->thread_lock[i]);
+            /* 清理之前已初始化的mutex/cond */
+            for (int j = 0; j < i; j++) {
+                pthread_mutex_destroy(&pool->thread_lock[j]);
+                pthread_cond_destroy(&pool->thread_wakeup[j]);
+            }
+            pthread_mutex_destroy(&pool->dispatch_lock);
             pool->initialized = 0;
             return -1;
         }
@@ -255,10 +269,15 @@ int thread_pool_parallel_for(thread_pool_t *pool,
     
     pthread_mutex_unlock(&pool->dispatch_lock);
     
-    /* 主线程等待所有任务完成（自旋等待） */
+    /* 主线程等待所有任务完成（自旋等待） - 添加超时机制 */
     for (int i = 0; i < threads_used; i++) {
-        while (atomic_load_ptr(&pool->thread_queue[i])) {
+        int retry = 0;
+        while (atomic_load_ptr(&pool->thread_queue[i]) && retry < 100000) {
             YIELDING;
+            retry++;
+        }
+        if (retry >= 100000) {
+            fprintf(stderr, "Warning: Task %d timeout after %d retries\n", i, retry);
         }
     }
     
@@ -344,8 +363,9 @@ int memory_pool_init(memory_pool_t *pool,
     /* 预分配模式 */
     if (pool->use_prealloc) {
         for (int i = 0; i < num_buffers; i++) {
-            int ret = posix_memalign(&pool->prealloc_buffers[i], 64, pool->buffer_size);
-            if (ret != 0 || !pool->prealloc_buffers[i]) {
+            void *tmp;
+            int ret = posix_memalign(&tmp, 64, pool->buffer_size);
+            if (ret != 0 || !tmp) {
                 fprintf(stderr, "Error: Failed to allocate aligned buffer %d (size=%zu, align=64, err=%d)\n", 
                         i, pool->buffer_size, ret);
                 
@@ -358,6 +378,7 @@ int memory_pool_init(memory_pool_t *pool,
                 pool->initialized = 0;
                 return -1;
             }
+            pool->prealloc_buffers[i] = tmp;
             pool->prealloc_used[i] = 0;
         }
     }
@@ -444,11 +465,13 @@ void *memory_alloc(memory_pool_t *pool) {
     /* 惰性分配：首次使用时才分配 */
     alloc_header_t *header = table[position];
     if (!header) {
-        int ret = posix_memalign((void **)&header, 64, pool->buffer_size);
-        if (ret != 0 || !header) {
+        void *tmp;
+        int ret = posix_memalign(&tmp, 64, pool->buffer_size);
+        if (ret != 0 || !tmp) {
             perror("Failed to allocate TLS buffer");
             return NULL;
         }
+        header = (alloc_header_t *)tmp;
         table[position] = header;
     }
     

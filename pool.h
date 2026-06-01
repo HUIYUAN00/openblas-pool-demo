@@ -76,13 +76,13 @@ typedef struct thread_pool {
     int shutdown;
 } thread_pool_t;
 
-/* OpenBLAS风格：alloc_t头部结构 */
+/* OpenBLAS风格：alloc_t头部结构 - 固定64字节大小 */
 typedef struct alloc_header {
     int used;
     int attr;
     void (*release_func)(struct alloc_header *);
-    char pad[64 - 2 * sizeof(int) - sizeof(void(*)(struct alloc_header *))];
-} alloc_header_t;
+    char pad[52];  /* 固定填充确保总大小64字节 */
+} __attribute__((aligned(64))) alloc_header_t;
 
 typedef struct memory_pool {
     /* TLS支持：线程本地存储key */
@@ -165,9 +165,9 @@ static inline unsigned long rpcc(void) {
     __asm__ __volatile__ ("mrs %0, cntvct_el0" : "=r" (val));
     return val;
 #elif defined(__x86_64__)
-    unsigned long val;
-    __asm__ __volatile__ ("rdtsc" : "=A" (val));
-    return val;
+    unsigned int lo, hi;
+    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
+    return ((unsigned long)hi << 32) | lo;
 #else
     return 0;
 #endif
