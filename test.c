@@ -58,14 +58,15 @@ static void simple_print(void *arg, int task_id) {
 
 static void test_basic_thread_pool() {
     printf("\n========================================\n");
-    printf("Test 1: Basic Thread Pool\n");
+    printf("Test 1: Basic Thread Pool (OpenBLAS-style)\n");
     printf("========================================\n\n");
     
     thread_pool_t pool;
     
-    printf("1.1 Initializing thread pool (4 threads)...\n");
-    thread_pool_init(&pool, 4);
-    printf("    Status: initialized=%d, threads=%d\n\n", pool.initialized, pool.num_threads);
+    printf("1.1 Initializing thread pool (4 threads, spinning=enabled)...\n");
+    thread_pool_init(&pool, 4, 1);  /* use_spinning=1 */
+    printf("    Status: initialized=%d, threads=%d, timeout=%u\n\n", 
+           pool.initialized, pool.num_threads, pool.thread_timeout);
     
     printf("1.2 Running 4 simple tasks...\n");
     double start = get_time_ms();
@@ -82,27 +83,28 @@ static void test_basic_thread_pool() {
 
 static void test_memory_pool() {
     printf("\n========================================\n");
-    printf("Test 2: Memory Pool\n");
+    printf("Test 2: Memory Pool (OpenBLAS TLS-style)\n");
     printf("========================================\n\n");
     
     memory_pool_t pool;
     
-    printf("2.1 Initializing memory pool (64KB, 8 buffers)...\n");
-    memory_pool_init(&pool, 64 * 1024, 8);
-    printf("    Status: initialized=%d, buffer_size=%zu\n\n", pool.initialized, pool.buffer_size);
+    printf("2.1 Initializing memory pool (64KB, 8 buffers, TLS=enabled)...\n");
+    memory_pool_init(&pool, 64 * 1024, 8, 1);  /* use_tls=1 */
+    printf("    Status: initialized=%d, buffer_size=%zu, TLS=%s\n\n", 
+           pool.initialized, pool.buffer_size, pool.use_prealloc ? "disabled" : "enabled");
     
     printf("2.2 Allocating buffers...\n");
     void *b1 = memory_alloc(&pool);
     void *b2 = memory_alloc(&pool);
     void *b3 = memory_alloc(&pool);
-    printf("    Buffer 1: %p\n", b1);
-    printf("    Buffer 2: %p\n", b2);
-    printf("    Buffer 3: %p\n\n", b3);
+    printf("    Buffer 1: %p (aligned)\n", b1);
+    printf("    Buffer 2: %p (aligned)\n", b2);
+    printf("    Buffer 3: %p (aligned)\n\n", b3);
     
-    printf("2.3 Testing buffer reuse...\n");
+    printf("2.3 Testing lazy free...\n");
     memory_free(&pool, b2);
     void *b4 = memory_alloc(&pool);
-    printf("    After free and realloc: b4=%p (should reuse b2's slot)\n\n", b4);
+    printf("    After free and realloc: b4=%p (reuses same buffer)\n\n", b4);
     
     memory_free(&pool, b1);
     memory_free(&pool, b3);
@@ -124,10 +126,10 @@ static void test_parallel_compute() {
     memory_pool_t mp;
     
     printf("3.1 Initializing pools...\n");
-    thread_pool_init(&tp, 4);
-    memory_pool_init(&mp, 128 * 1024, 8);
-    printf("    Thread pool: %d threads\n", tp.num_threads);
-    printf("    Memory pool: %zu bytes\n\n", mp.buffer_size);
+    thread_pool_init(&tp, 4, 1);  /* spinning enabled */
+    memory_pool_init(&mp, 128 * 1024, 8, 1);  /* TLS enabled */
+    printf("    Thread pool: %d threads, timeout=%u cycles\n", tp.num_threads, tp.thread_timeout);
+    printf("    Memory pool: %zu bytes, TLS enabled\n\n", mp.buffer_size);
     
     int data[1000];
     work_ctx_t ctx;
@@ -169,8 +171,11 @@ static void test_performance() {
     thread_pool_t tp;
     memory_pool_t mp;
     
-    thread_pool_init(&tp, 4);
-    memory_pool_init(&mp, 256 * 1024, 8);
+    printf("4.1 Initializing pools...\n");
+    thread_pool_init(&tp, 4, 1);  /* spinning enabled */
+    memory_pool_init(&mp, 256 * 1024, 8, 1);  /* TLS enabled */
+    printf("    Thread pool: %d threads, spinning enabled\n", tp.num_threads);
+    printf("    Memory pool: %zu bytes, TLS enabled\n\n", mp.buffer_size);
     
     int data[4000];
     work_ctx_t ctx;
@@ -203,12 +208,14 @@ static void test_performance() {
 int main() {
     printf("================================================\n");
     printf("  OpenBLAS-Style Thread & Memory Pool Demo\n");
+    printf("  (With Spinning + TLS Optimizations)\n");
     printf("================================================\n");
     printf("\n");
     printf("Key Features (based on OpenBLAS design):\n");
-    printf("  - Thread pool: Pre-spawned threads, condition variable sync\n");
-    printf("  - Memory pool: Pre-allocated buffers, reuse on free\n");
-    printf("  - Parallel-for pattern: Task distribution to threads\n");
+    printf("  - Thread pool: YIELDING spinning + condition variable\n");
+    printf("  - Memory pool: TLS + lazy allocation + 64-byte aligned\n");
+    printf("  - Atomic queue: C11 atomic with ACQUIRE/RELEASE\n");
+    printf("  - Memory barrier: ARM64(x86) MB/WMB/RMB\n");
     printf("\n");
     
     test_basic_thread_pool();
