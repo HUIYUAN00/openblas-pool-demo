@@ -37,7 +37,7 @@ static void parallel_work(void *arg, int task_id) {
     if (end > ctx->total_size) end = ctx->total_size;
     
     int *local = (int *)buf;
-    size_t buf_size = ctx->mem_pool->buffer_size;
+    size_t buf_size = memory_pool_get_buffer_size(ctx->mem_pool);
     
     for (int i = start; i < end; i++) {
         ctx->data[i] = task_id * 1000 + i;
@@ -61,22 +61,26 @@ static void test_basic_thread_pool() {
     printf("Test 1: Basic Thread Pool (OpenBLAS-style)\n");
     printf("========================================\n\n");
     
-    thread_pool_t pool;
-    
-    printf("1.1 Initializing thread pool (4 threads, spinning=enabled)...\n");
-    thread_pool_init(&pool, 4, 1);  /* use_spinning=1 */
+    printf("1.1 Creating thread pool (4 threads, spinning=enabled)...\n");
+    thread_pool_t *pool = thread_pool_create(4, 1);
+    if (!pool) {
+        fprintf(stderr, "Failed to create thread pool\n");
+        return;
+    }
     printf("    Status: initialized=%d, threads=%d, timeout=%u\n\n", 
-           pool.initialized, pool.num_threads, pool.thread_timeout);
+           thread_pool_is_initialized(pool), 
+           thread_pool_get_num_threads(pool), 
+           thread_pool_get_timeout(pool));
     
     printf("1.2 Running 4 simple tasks...\n");
     double start = get_time_ms();
-    thread_pool_parallel_for(&pool, simple_print, NULL, 4);
+    thread_pool_parallel_for(pool, simple_print, NULL, 4);
     double end = get_time_ms();
     printf("    Execution time: %.2f ms\n\n", end - start);
     
-    printf("1.3 Shutting down pool...\n");
-    thread_pool_shutdown(&pool);
-    printf("    Status: initialized=%d\n\n", pool.initialized);
+    printf("1.3 Destroying pool...\n");
+    thread_pool_destroy(pool);
+    printf("    Pool destroyed\n\n");
     
     printf("Test 1: PASSED\n");
 }
@@ -86,33 +90,37 @@ static void test_memory_pool() {
     printf("Test 2: Memory Pool (OpenBLAS TLS-style)\n");
     printf("========================================\n\n");
     
-    memory_pool_t pool;
-    
-    printf("2.1 Initializing memory pool (64KB, 8 buffers, TLS=enabled)...\n");
-    memory_pool_init(&pool, 64 * 1024, 8, 1);  /* use_tls=1 */
+    printf("2.1 Creating memory pool (64KB, 8 buffers, TLS=enabled)...\n");
+    memory_pool_t *pool = memory_pool_create(64 * 1024, 8, 1);
+    if (!pool) {
+        fprintf(stderr, "Failed to create memory pool\n");
+        return;
+    }
     printf("    Status: initialized=%d, buffer_size=%zu, TLS=%s\n\n", 
-           pool.initialized, pool.buffer_size, pool.use_prealloc ? "disabled" : "enabled");
+           memory_pool_is_initialized(pool), 
+           memory_pool_get_buffer_size(pool), 
+           memory_pool_is_tls_enabled(pool) ? "enabled" : "disabled");
     
     printf("2.2 Allocating buffers...\n");
-    void *b1 = memory_alloc(&pool);
-    void *b2 = memory_alloc(&pool);
-    void *b3 = memory_alloc(&pool);
+    void *b1 = memory_alloc(pool);
+    void *b2 = memory_alloc(pool);
+    void *b3 = memory_alloc(pool);
     printf("    Buffer 1: %p (aligned)\n", b1);
     printf("    Buffer 2: %p (aligned)\n", b2);
     printf("    Buffer 3: %p (aligned)\n\n", b3);
     
     printf("2.3 Testing lazy free...\n");
-    memory_free(&pool, b2);
-    void *b4 = memory_alloc(&pool);
+    memory_free(pool, b2);
+    void *b4 = memory_alloc(pool);
     printf("    After free and realloc: b4=%p (reuses same buffer)\n\n", b4);
     
-    memory_free(&pool, b1);
-    memory_free(&pool, b3);
-    memory_free(&pool, b4);
+    memory_free(pool, b1);
+    memory_free(pool, b3);
+    memory_free(pool, b4);
     
     printf("2.4 Destroying memory pool...\n");
-    memory_pool_destroy(&pool);
-    printf("    Status: initialized=%d\n\n", pool.initialized);
+    memory_pool_destroy(pool);
+    printf("    Pool destroyed\n\n");
     
     printf("Test 2: PASSED\n");
 }
@@ -122,24 +130,32 @@ static void test_parallel_compute() {
     printf("Test 3: Parallel Computation\n");
     printf("========================================\n\n");
     
-    thread_pool_t tp;
-    memory_pool_t mp;
-    
-    printf("3.1 Initializing pools...\n");
-    thread_pool_init(&tp, 4, 1);  /* spinning enabled */
-    memory_pool_init(&mp, 128 * 1024, 8, 1);  /* TLS enabled */
-    printf("    Thread pool: %d threads, timeout=%u cycles\n", tp.num_threads, tp.thread_timeout);
-    printf("    Memory pool: %zu bytes, TLS enabled\n\n", mp.buffer_size);
+    printf("3.1 Creating pools...\n");
+    thread_pool_t *tp = thread_pool_create(4, 1);
+    if (!tp) {
+        fprintf(stderr, "Failed to create thread pool\n");
+        return;
+    }
+    memory_pool_t *mp = memory_pool_create(128 * 1024, 8, 1);
+    if (!mp) {
+        fprintf(stderr, "Failed to create memory pool\n");
+        thread_pool_destroy(tp);
+        return;
+    }
+    printf("    Thread pool: %d threads, timeout=%u cycles\n", 
+           thread_pool_get_num_threads(tp), thread_pool_get_timeout(tp));
+    printf("    Memory pool: %zu bytes, TLS enabled\n\n", 
+           memory_pool_get_buffer_size(mp));
     
     int data[1000];
     work_ctx_t ctx;
     ctx.data = data;
     ctx.total_size = 1000;
-    ctx.mem_pool = &mp;
+    ctx.mem_pool = mp;
     
     printf("3.2 Running parallel computation...\n");
     double start = get_time_ms();
-    thread_pool_parallel_for(&tp, parallel_work, &ctx, 4);
+    thread_pool_parallel_for(tp, parallel_work, &ctx, 4);
     double end = get_time_ms();
     printf("    Execution time: %.2f ms\n\n", end - start);
     
@@ -157,8 +173,8 @@ static void test_parallel_compute() {
     }
     printf("    Verification: %s\n\n", errors == 0 ? "PASSED" : "FAILED");
     
-    thread_pool_shutdown(&tp);
-    memory_pool_destroy(&mp);
+    thread_pool_destroy(tp);
+    memory_pool_destroy(mp);
     
     printf("Test 3: PASSED\n");
 }
@@ -168,20 +184,28 @@ static void test_performance() {
     printf("Test 4: Performance Benchmark\n");
     printf("========================================\n\n");
     
-    thread_pool_t tp;
-    memory_pool_t mp;
-    
-    printf("4.1 Initializing pools...\n");
-    thread_pool_init(&tp, 4, 1);  /* spinning enabled */
-    memory_pool_init(&mp, 256 * 1024, 8, 1);  /* TLS enabled */
-    printf("    Thread pool: %d threads, spinning enabled\n", tp.num_threads);
-    printf("    Memory pool: %zu bytes, TLS enabled\n\n", mp.buffer_size);
+    printf("4.1 Creating pools...\n");
+    thread_pool_t *tp = thread_pool_create(4, 1);
+    if (!tp) {
+        fprintf(stderr, "Failed to create thread pool\n");
+        return;
+    }
+    memory_pool_t *mp = memory_pool_create(256 * 1024, 8, 1);
+    if (!mp) {
+        fprintf(stderr, "Failed to create memory pool\n");
+        thread_pool_destroy(tp);
+        return;
+    }
+    printf("    Thread pool: %d threads, spinning enabled\n", 
+           thread_pool_get_num_threads(tp));
+    printf("    Memory pool: %zu bytes, TLS enabled\n\n", 
+           memory_pool_get_buffer_size(mp));
     
     int data[4000];
     work_ctx_t ctx;
     ctx.data = data;
     ctx.total_size = 4000;
-    ctx.mem_pool = &mp;
+    ctx.mem_pool = mp;
     
     int iterations = 100;
     printf("Running %d iterations...\n", iterations);
@@ -189,7 +213,7 @@ static void test_performance() {
     double total_time = 0;
     for (int i = 0; i < iterations; i++) {
         double start = get_time_ms();
-        thread_pool_parallel_for(&tp, parallel_work, &ctx, 4);
+        thread_pool_parallel_for(tp, parallel_work, &ctx, 4);
         double end = get_time_ms();
         total_time += (end - start);
     }
@@ -199,8 +223,8 @@ static void test_performance() {
     printf("  Per iteration:   %.2f ms\n", total_time / iterations);
     printf("  Throughput:      %.2f iter/s\n\n", iterations / (total_time / 1000));
     
-    thread_pool_shutdown(&tp);
-    memory_pool_destroy(&mp);
+    thread_pool_destroy(tp);
+    memory_pool_destroy(mp);
     
     printf("Test 4: PASSED\n");
 }
